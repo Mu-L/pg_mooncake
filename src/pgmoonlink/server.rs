@@ -12,12 +12,16 @@ static BACKEND: LazyLock<MoonlinkBackend<TableId>> = LazyLock::new(MoonlinkBacke
 
 #[tokio::main]
 pub(super) async fn start() {
-    let mut sigterm = signal(SignalKind::terminate()).unwrap();
+    let mut sigterm = signal(SignalKind::terminate())
+        .unwrap_or_else(|e| panic!("error setting SIGTERM handler: {e}"));
     LazyLock::force(&BACKEND);
     if fs::metadata(SOCKET_PATH).await.is_ok() {
-        fs::remove_file(SOCKET_PATH).await.unwrap();
+        fs::remove_file(SOCKET_PATH)
+            .await
+            .unwrap_or_else(|_| panic!("error removing socket: {SOCKET_PATH}"));
     }
-    let listener = UnixListener::bind(SOCKET_PATH).unwrap();
+    let listener = UnixListener::bind(SOCKET_PATH)
+        .unwrap_or_else(|_| panic!("error binding socket: {SOCKET_PATH}"));
     loop {
         tokio::select! {
             _ = sigterm.recv() => break,
@@ -51,10 +55,7 @@ async fn handle_stream(mut stream: UnixStream) -> Result<(), Eof> {
 }
 
 async fn create_snapshot(stream: &mut UnixStream, table_id: TableId, lsn: u64) -> Result<(), Eof> {
-    BACKEND
-        .create_iceberg_snapshot(&table_id, lsn)
-        .await
-        .unwrap();
+    check_moonlink(BACKEND.create_iceberg_snapshot(&table_id, lsn).await);
     write(stream, &()).await
 }
 
@@ -64,7 +65,7 @@ async fn create_table(
     table: String,
     uri: String,
 ) -> Result<(), Eof> {
-    BACKEND.create_table(table_id, &table, &uri).await.unwrap();
+    check_moonlink(BACKEND.create_table(table_id, &table, &uri).await);
     write(stream, &()).await
 }
 
@@ -74,7 +75,7 @@ async fn scan_table_begin(
     table_id: TableId,
     lsn: u64,
 ) -> Result<(), Eof> {
-    let state = BACKEND.scan_table(&table_id, Some(lsn)).await.unwrap();
+    let state = check_moonlink(BACKEND.scan_table(&table_id, Some(lsn)).await);
     write(stream, &state.data).await?;
     map.insert(table_id, state);
     Ok(())
@@ -90,8 +91,9 @@ async fn scan_table_end(
 }
 
 async fn write<E: Encode>(stream: &mut UnixStream, data: &E) -> Result<(), Eof> {
-    let bytes = bincode::encode_to_vec(data, BINCODE_CONFIG).unwrap();
-    let len = u32::try_from(bytes.len()).unwrap();
+    let bytes = bincode::encode_to_vec(data, BINCODE_CONFIG)
+        .unwrap_or_else(|e| panic!("error encoding packet: {e}"));
+    let len = u32::try_from(bytes.len()).unwrap_or_else(|_| panic!("packet too long"));
     check_eof(stream.write_all(&len.to_ne_bytes()).await)?;
     check_eof(stream.write_all(&bytes).await)
 }
@@ -102,7 +104,8 @@ async fn read<D: Decode<()>>(stream: &mut UnixStream) -> Result<D, Eof> {
     let len = u32::from_ne_bytes(buf);
     let mut bytes = vec![0; len as usize];
     check_eof(stream.read_exact(&mut bytes).await)?;
-    let (data, _) = bincode::decode_from_slice(&bytes, BINCODE_CONFIG).unwrap();
+    let (data, _) = bincode::decode_from_slice(&bytes, BINCODE_CONFIG)
+        .unwrap_or_else(|e| panic!("error decoding packet: {e}"));
     Ok(data)
 }
 
@@ -117,4 +120,8 @@ fn check_eof<T>(r: std::io::Result<T>) -> Result<T, Eof> {
             _ => panic!("IO error: {e}"),
         },
     }
+}
+
+fn check_moonlink<T>(r: moonlink_backend::Result<T>) -> T {
+    r.unwrap_or_else(|e| panic!("moonlink error: {e}"))
 }

@@ -4,8 +4,12 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::{LazyLock, Mutex};
 
-static STREAM: LazyLock<Mutex<UnixStream>> =
-    LazyLock::new(|| Mutex::new(UnixStream::connect(SOCKET_PATH).unwrap()));
+static STREAM: LazyLock<Mutex<UnixStream>> = LazyLock::new(|| {
+    Mutex::new(
+        UnixStream::connect(SOCKET_PATH)
+            .unwrap_or_else(|e| panic!("error connecting to socket: {e}")),
+    )
+});
 
 pub(crate) fn create_snapshot(database_id: u32, table_id: u32, lsn: u64) {
     let mut stream = STREAM.lock().unwrap();
@@ -47,19 +51,24 @@ pub(super) fn scan_table_end(table_id: TableId) {
 }
 
 fn write<E: Encode>(stream: &mut UnixStream, data: &E) {
-    let bytes = bincode::encode_to_vec(data, BINCODE_CONFIG).unwrap();
-    let len = u32::try_from(bytes.len()).unwrap();
-    stream.write_all(&len.to_ne_bytes()).unwrap();
-    stream.write_all(&bytes).unwrap();
+    let bytes = bincode::encode_to_vec(data, BINCODE_CONFIG)
+        .unwrap_or_else(|e| panic!("error encoding packet: {e}"));
+    let len = u32::try_from(bytes.len()).unwrap_or_else(|_| panic!("packet too long"));
+    check_io(stream.write_all(&len.to_ne_bytes()));
+    check_io(stream.write_all(&bytes));
 }
 
 fn read<D: Decode<()>>(stream: &mut UnixStream) -> D {
     let mut buf = [0; 4];
-    stream.read_exact(&mut buf).unwrap();
+    check_io(stream.read_exact(&mut buf));
     let len = u32::from_ne_bytes(buf);
     let mut bytes = vec![0; len as usize];
-    stream.read_exact(&mut bytes).unwrap();
-    bincode::decode_from_slice(&bytes, BINCODE_CONFIG)
-        .unwrap()
-        .0
+    check_io(stream.read_exact(&mut bytes));
+    let (data, _) = bincode::decode_from_slice(&bytes, BINCODE_CONFIG)
+        .unwrap_or_else(|e| panic!("error decoding packet: {e}"));
+    data
+}
+
+fn check_io<T>(r: std::io::Result<T>) -> T {
+    r.unwrap_or_else(|e| panic!("IO error: {e}"))
 }

@@ -60,14 +60,12 @@ fn parse_table(table: &str) -> String {
     let caps = re
         .captures(table)
         .unwrap_or_else(|| panic!("invalid input: {table}"));
-    let schema = caps.name("schema").map_or_else(
-        || {
-            let schema: &CStr =
-                unsafe { direct_function_call(pg_sys::current_schema, &[]).unwrap() };
-            schema.to_str().unwrap()
-        },
-        |m| m.as_str(),
-    );
+    let schema = if let Some(schema) = caps.name("schema") {
+        schema.as_str()
+    } else {
+        let schema: &CStr = unsafe { direct_function_call(pg_sys::current_schema, &[]).unwrap() };
+        schema.to_str().unwrap()
+    };
     spi::quote_qualified_identifier(schema, &caps["table"])
 }
 
